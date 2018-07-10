@@ -1,0 +1,154 @@
+#: Title       : X509utls
+#: Date        : 2018-05-15
+#: Author      : "Kybernetes" <correodelkybernetes@gmail.com>
+#: Version     : 1.0.0
+#: Description : Dash function declarations file
+#:             : Provides useful openssl x509 wrappers
+#: Options     : N/A
+##
+## Includes
+. /usr/lib/shutls1.0/core/nmeutls || exit 1   ## Utilities for shell names
+. /usr/lib/shutls1.0/core/strngutls || exit 1 ## Utilities for string handling
+. /usr/lib/shutls1.0/core/stdioutls || exit 1 ## Utilities for STDIN/ERR
+##
+## -- Source time configuration ------------------------------------------------
+## These globals should be changed before including (i.e. sourcing) this file.
+## Any changes after sourcing won't impact on functions behaviour.
+_X509UTLS_CMD_OPENSSL=${_X509UTLS_CMD_OPENSSL:-/bin/openssl} ## The Openssl kit
+# Create alias to force use specific path within functions, while keeping syntax
+# short. It will expand on func. declaration NOT on invocation. But DON'T put it
+# inside "if" or any other onstruct command list: it could render it useless!!
+alias x509="$_X509UTLS_CMD_OPENSSL x509"
+##
+## Declarations
+if [ "X$_DEF_OSSLUTILS" = X ]; then ## Do not define if already defined
+readonly _DEF_OSSLUTILS=:           ## So far used only for consistency
+_RPLY=                              ## Read builtin reply.    
+[ -x "$_X509UTLS_CMD_OPENSSL" ] ||
+    { printf "Osslutls: $_X509UTLS_CMD_OPENSSL not found\n"; exit 1; }
+##
+## Function declarations -------------------------------------------------------
+x509VFrm() { #@ DESCRIPTION: Checks if $1 string matches one of the 3 valid
+             #@              certificate formats PEM, DER or NET.
+             #@ USAGE: x509VFrm NAME STRING
+    case $1 in
+        PEM|pem|DER|der|NET|net) ;;
+        *) return 1 ;;
+    esac
+}
+x509TypCrt() { #@ DESCRIPTION: Checks if existing file in $2 path is a SSL cert.
+               #@              of the type specified by $1. If $2 is not set,
+               #@              reads cert from STDIN and $1 becomes optional,
+               #@              assuming PEM by default. x509 output is preserved
+               #@              to make it suitable for pipelines.
+               #@ USAGE: x509TypCrt [ PEM|DER|NET [ PATH ] ]
+    # Try to open file if specified via $2. Else, STDIN will be used
+    # Save STDIN to fd3 and redirect from $2 if specified. Also nullIfy STDERR
+    if ! eval ${2+exec 3<&0 <\"\$2\"} 2>/dev/null; then ## Failed to open cert?
+        errmsg "Failed to open file $2" ## Write error message to STDERR
+        exec 3<&-                       ## Close fd3. Just in case. 
+        return 2                        ## Report failure to calling env.
+    fi
+    # Now read from open file or STDIN certificate in specified format. x509
+    # shall fail if file's format is NOT that of $1. Nullify STDERR but keep
+    # certificate in the STDOUT.
+    if ! x509 ${1+-inform $1} 2>/dev/null; then      ## Not $1 format?
+        errmsg "Certificate format is NOT ${1:-PEM}" ## Write error to STDERR
+        eval ${2+exec <&3 3<&-}                      ## Undo previous redirectn.
+        return 1                                     ## Report failure.
+    fi                                               ## Also undo redirection on
+    eval ${2+exec <&3 3<&-}                          ## success (close any fds).
+}
+x509VTime() { #@ DESCRIPTION: Checks if $1 string is a valid time specification
+              #@              allowing only signed integer optionally suffixed
+              #@              by only one of the following iso abbreviations:
+              #@              * s  : for seconds;
+              #@              * min: for minutes;
+              #@              * h  : for hours;
+              #@              * d  : for days.
+              #@ USAGE: x509VTime TIMESPEC
+    set -- "${1#"${1%%[!-+]*}"}"      ## Discard all leading -/+ chars
+    case $1 in                        ## End in digit or a digit and suffix?
+        *[0-9]|*[0-9]min|*[0-9][shd]) ## Yes, rm sufix & check for digits only;
+            nmrc "${1%%[mshd]*}" || return 2 ;; ## Reject when not digits only;
+        *) return 1 ;;                ## No, reject.            
+    esac
+}
+x509ChkEnd() { #@ DESCRIPTOIN: Checks if existing $3 SSL certificate will due
+               #@              after $1 time. $2 is needed to specify expected
+               #@              cert. format when $3 is present. Otherwise cert.
+               #@              will be read from STDIN and PEM fromat assumed.
+               #@              Time may be specified w/an integer followed by
+               #@              by a suffix, which when missing s is assumed.
+               #@ USAGE: x509ChkEndS INT[s|min|h|d] [ PEM|DER|NET [ PATH ] ]
+    # Local variables ("local" must be function's first statement)
+    local t=0 u=                          ## Specified time and units storage
+    rtrim t "$1" "[mshd]*"                ## Extract figures from time spec.
+    ltrim u "$1" "$t"                     ## Extract units from time spec.
+    case $u in                            ## Apply conversion based on units
+        "" | s) ;;                        ## Units missing/empty? seconds. None
+        min) t=$((t*60)) ;;               ## Minutes? apply a factor of 60
+        h) t=$((t*3600)) ;;               ## Hours? apply a factor of 3600
+        d) t=$((t*86400)) ;;              ## Days? apply a factor of 86400
+    esac
+    # Try to open file if specified via $3. Else, STDIN will be used.
+    # Save STDIN to fd3 and redirect from $3 if specified. Also nullIfy STDERR
+    if ! eval ${3+exec 3<&0 <\"\$3\"} 2>/dev/null; then ## Failed open cert?
+        errmsg "Failed to open file $2" ## Write error message to STDERR
+        exec 3<&-                       ## Close fd3. Just in case. 
+        return 2                        ## Report failure to calling env.
+    fi
+    # Now read from open file or STDIN certificate in specified format. 
+    if ! x509 -checkend $t ${2+-inform $2} >/dev/null 2>&1; then ## Exp bfre $1?
+        errmsg "Certificate will expire." ## Write error to STDERR
+        eval ${3+exec <&3 3<&-}           ## Undo previous redirectn.
+        return 1                          ## Report failure.
+    fi                                    ## Also undo redirection on
+    eval ${3+exec <&3 3<&-}               ## success (close any fds).
+}
+_x509GetEnd() { #@ DESCRIPTION: Gets the full expiry date string of $3 ssl cert.
+                #@              whose format is $2, to $1 referenced variable.
+                #@              $2 is used to specify expected cert. format if
+                #@              $3 is present. Otherwise cert. will be read from
+                #@              STDIN and PEM format assumed.
+                #@ USAGE: _x509GetEnd NAME [ [ PEM|DER|NET ] PATH ]
+                #@        /!\ - Warning - /!\ Do not call directly. use below
+                #@        wrapper instead. 
+    # Local variables ("local" must be function's first statement)
+    local cert= end=                     ## Cert. pem string and end date
+    # Try to open file if specified via $3. Else, STDIN will be used.
+    # Save STDIN to fd3 and redirect from $3 if specified. Also nullIfy STDERR
+    if ! eval ${3+exec 3<&0 <\"\$3\"} 2>/dev/null; then ## Failed to open cert?
+        errmsg "Failed to opena file $2" ## Write error message to STDERR
+        exec 3<&-                        ## Close fd3. Just in case. 
+        return 2                         ## Report failure to calling env.
+    fi
+    while read -r _RPLY; do              ## Now read cert. in PEM form by lines
+        isnul "$end" &&                  ## If End date has not been set
+            end=$_RPLY ||                ## * Expect to read it from first line
+                cert=$cert$_RPLY$_LF     ## * Else, assume line part of cert
+    done <<EOF
+$(LC_CTYPE=C x509 -enddate ${2+-inform $2} 2>/dev/null)
+EOF
+    printf -- "%s" "$cert"               ## Print accum. certificate to STDOUT
+    case $end in                         ## First first line contents..
+        notAfter=*)                      ## Starts w/"notAfter=.."?
+            ltrim $1 "$end" "notAfter="  ## * Yes, Set $1 name to equality's RHS
+            eval ${3+exec <&3 3<&-} ;;   ##   & undo initial redirect (if any);
+        *)                               ## * No, left $1 name unassigned and
+            eval ${3+exec <&3 3<&-}      ##   undo initial redirection;
+            return 1 ;;                  ##   Also report error to calling env.
+    esac
+}
+x509GetEnd() { #@ DESCRIPTION: Gets the full expiry date string of a ssl cert.
+               #@              using _x509GetEnd().
+               #@ USAGE: x509GetEnd [ _x509GetEnd() pars. ]
+               #@        Use this wrapper when you want to call _x509GetEnd()
+    # Local variables ("local" must be function's first statement)
+    local _$1                                        ## Crete temp storage
+    _x509GetEnd _$1 ${2+"$2"} ${3+"$3"} || return $? ## Set local temp w/wrapper
+    getvar $1 _$1                                    ## Set referenced name
+}
+fi
+# Aliases no longer needed after function declarations
+unalias x509
